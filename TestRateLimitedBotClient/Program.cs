@@ -1,33 +1,47 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using MihaZupan.TelegramBotClients;
 using MihaZupan.TelegramBotClients.RateLimitedClient;
 using Moq;
+using Newtonsoft.Json;
 using Telegram.Bot;
 using Telegram.Bot.Types;
-using Telegram.Bot.Types.Enums;
 
 namespace TestRateLimitedBotClient
 {
     public class ChatSentTime
     {
+        // ReSharper disable once UnusedMember.Global
         public string ChatType => ChatId < 0 ? "Group" : "Private";
         public int ChatId { get; set; }
-        public List<string> SentTime { get; set; }
+        // ReSharper disable once CollectionNeverQueried.Global
+        public List<string> SentTimes { get; set; }
     }
-    
-    class Program
+
+    static class Program
     {
-        static void Main()
+        private static readonly Mock<ITelegramBotClient> ClientMock = new Mock<ITelegramBotClient>();
+
+        private static RateLimitedTelegramBotClient _rateLimitedClient;
+
+        private static void AddSendTime(IReadOnlyDictionary<int, ChatSentTime> sentTimes, int chatId, double elapsedSeconds)
         {
-            int i;
-            var mock = new Mock<ITelegramBotClient>();
-            var client = new RateLimitedTelegramBotClient(mock.Object, SchedulerSettings.Default);
+            sentTimes[chatId].SentTimes.Add(elapsedSeconds.ToString(CultureInfo.InvariantCulture));
+        }
+        
+        private static Dictionary<int, ChatSentTime> GetSentTimes(int minChatId, int maxChatId)
+        {
+            _rateLimitedClient =
+                new RateLimitedTelegramBotClient(ClientMock.Object, SchedulerSettings.Default);
+            var i = minChatId;
+            var clock = Stopwatch.StartNew();
             var chatSentTimes = new Dictionary<int, ChatSentTime>();
-            var halfOfChats = 10;
-            var minChatId = -halfOfChats;
-            var maxChatId = halfOfChats;
+            ClientMock.Setup(m => m.SendTextMessageAsync(It.IsAny<ChatId>(), It.IsAny<string>(), default,
+                default, default, default, default, default)).Callback(
+                // ReSharper disable once AccessToModifiedClosure
+                () => AddSendTime(chatSentTimes, i, clock.Elapsed.TotalSeconds));
 
             for (i = minChatId; i <= maxChatId; i++)
             {
@@ -35,31 +49,33 @@ namespace TestRateLimitedBotClient
                 chatSentTimes.Add(i, new ChatSentTime
                 {
                     ChatId = i,
-                    SentTime = new List<string>()
+                    SentTimes = new List<string>()
                 });
-                ;
             }
-
-            i = 0;
-
-            var clock = Stopwatch.StartNew();
-            int chatId;
             while (true)
             {
                 i++;
-                chatId = i % (halfOfChats << 1) - halfOfChats;
-                if (chatId == 0)
+                if (i >= maxChatId)
+                    i = minChatId;
+                if (i == 0)
                     continue;
-                mock.Setup(m => m.SendTextMessageAsync(It.IsAny<ChatId>(), It.IsAny<string>(), default(ParseMode),
-                    default, default, default, default, default)).Callback(
-                    () => chatSentTimes[chatId].SentTime.Add(clock.Elapsed.TotalSeconds.ToString()));
-                client.SendTextMessageAsync(new ChatId(chatId), "123456").GetAwaiter().GetResult();
-
-                if (clock.Elapsed > TimeSpan.FromSeconds(20))
+                _rateLimitedClient.SendTextMessageAsync(new ChatId(i), "123456").GetAwaiter().GetResult();
+                if (clock.Elapsed > TimeSpan.FromSeconds(10))
                     break;
             }
-
             clock.Stop();
+            return chatSentTimes;
+        }
+        
+        static void Main()
+        {
+            var sendTimes = GetSentTimes(0, 10);
+            var sendTimesUsers = JsonConvert.SerializeObject(sendTimes);
+            sendTimes = GetSentTimes(-10, 0);
+            var sendTimesGroups = JsonConvert.SerializeObject(sendTimes);
+            sendTimes = GetSentTimes(-10, 10);
+            var sendTimesMixed = JsonConvert.SerializeObject(sendTimes);
+            Console.WriteLine($"{sendTimesUsers}\r\n\r\n{sendTimesGroups}\r\n\r\n{sendTimesMixed}");
             Console.ReadKey();
         }
     }
